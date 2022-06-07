@@ -4,8 +4,6 @@ project: goscript
 # Target name (should be unique within the project)
 target: parse_file
 
-# Base image to run the binary in.
-# image: ghcr.io/prateekvishnu/goscript:latest
 
 # List of commands used to test the target
 cmds:
@@ -13,6 +11,3 @@ cmds:
     # Command used to start the target, "@@" is the input file
     # (when "@@" is omitted Mayhem defaults to stdin inputs)
     - cmd: /parse_file
-
- 
-
