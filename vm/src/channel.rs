@@ -5,15 +5,14 @@
 use super::instruction::*;
 use super::value::*;
 use futures_lite::future;
-use rand::prelude::*;
-use std::cell::RefCell;
-use std::mem;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
 pub enum RendezvousState {
-    Empty,
-    Full(GosValue),
+    NotReady,
+    Ready,
+    InPlace(GosValue),
     Closed,
 }
 
@@ -23,13 +22,14 @@ pub enum Channel {
         async_channel::Sender<GosValue>,
         async_channel::Receiver<GosValue>,
     ),
+    // Cloning Channel needs to return the same channel, hence the Rc
     Rendezvous(Rc<RefCell<RendezvousState>>),
 }
 
 impl Channel {
     pub fn new(cap: usize) -> Channel {
         if cap == 0 {
-            Channel::Rendezvous(Rc::new(RefCell::new(RendezvousState::Empty)))
+            Channel::Rendezvous(Rc::new(RefCell::new(RendezvousState::NotReady)))
         } else {
             let (s, r) = async_channel::bounded(cap);
             Channel::Bounded(s, r)
@@ -66,15 +66,15 @@ impl Channel {
         match self {
             Channel::Bounded(s, _) => s.try_send(v),
             Channel::Rendezvous(state) => {
-                let state_ref = state.borrow();
+                let mut state_ref = state.borrow_mut();
                 let s: &RendezvousState = &state_ref;
                 match s {
-                    RendezvousState::Empty => {
-                        drop(state_ref);
-                        *state.borrow_mut() = RendezvousState::Full(v);
+                    RendezvousState::NotReady => Err(async_channel::TrySendError::Full(v)),
+                    RendezvousState::Ready => {
+                        *state_ref = RendezvousState::InPlace(v);
                         Ok(())
                     }
-                    RendezvousState::Full(_) => Err(async_channel::TrySendError::Full(v)),
+                    RendezvousState::InPlace(_) => Err(async_channel::TrySendError::Full(v)),
                     RendezvousState::Closed => Err(async_channel::TrySendError::Closed(v)),
                 }
             }
@@ -85,15 +85,19 @@ impl Channel {
         match self {
             Channel::Bounded(_, r) => r.try_recv(),
             Channel::Rendezvous(state) => {
-                let state_ref = state.borrow();
+                let mut state_ref = state.borrow_mut();
                 let s: &RendezvousState = &state_ref;
                 match s {
-                    RendezvousState::Empty => Err(async_channel::TryRecvError::Empty),
-                    RendezvousState::Full(_) => {
+                    RendezvousState::NotReady => {
+                        *state_ref = RendezvousState::Ready;
+                        Err(async_channel::TryRecvError::Empty)
+                    }
+                    RendezvousState::Ready => Err(async_channel::TryRecvError::Empty),
+                    RendezvousState::InPlace(_) => {
                         drop(state_ref);
-                        let cur_state: &mut RendezvousState = &mut state.borrow_mut();
-                        let full = mem::replace(cur_state, RendezvousState::Empty);
-                        if let RendezvousState::Full(v) = full {
+                        if let RendezvousState::InPlace(v) =
+                            state.replace(RendezvousState::NotReady)
+                        {
                             Ok(v)
                         } else {
                             unreachable!()
@@ -106,11 +110,13 @@ impl Channel {
     }
 
     pub async fn send(&self, v: &GosValue) -> RuntimeResult<()> {
+        let mut val = Some(v.clone());
         loop {
-            match self.try_send(v.clone()) {
+            match self.try_send(val.take().unwrap()) {
                 Ok(()) => return Ok(()),
                 Err(e) => match e {
-                    async_channel::TrySendError::Full(_) => {
+                    async_channel::TrySendError::Full(v) => {
+                        val = Some(v);
                         future::yield_now().await;
                     }
                     async_channel::TrySendError::Closed(_) => {
@@ -122,6 +128,7 @@ impl Channel {
     }
 
     pub async fn recv(&self) -> Option<GosValue> {
+        //dbg!(self);
         loop {
             match self.try_recv() {
                 Ok(v) => return Some(v),
@@ -136,38 +143,45 @@ impl Channel {
     }
 }
 
-pub enum SelectComm {
-    Send(GosValue, GosValue, OpIndex),
-    Recv(GosValue, ValueType, OpIndex),
+pub enum SelectCommType {
+    Send(GosValue),
+    Recv(ValueType, OpIndex),
+}
+
+pub struct SelectComm {
+    pub typ: SelectCommType,
+    pub chan: GosValue,
+    pub offset: OpIndex,
 }
 
 pub struct Selector {
     pub comms: Vec<SelectComm>,
     pub default_offset: Option<OpIndex>,
+    // use a fake random to avoid dependencies
+    pseudo_rand: Cell<usize>,
 }
 
 impl Selector {
     pub fn new(comms: Vec<SelectComm>, default_offset: Option<OpIndex>) -> Selector {
         Selector {
-            comms: comms,
-            default_offset: default_offset,
+            comms,
+            default_offset,
+            pseudo_rand: Cell::new(0),
         }
     }
 
     pub async fn select(&self) -> RuntimeResult<(usize, Option<GosValue>)> {
         let count = self.comms.len();
-        let mut rng = rand::thread_rng();
+        let rand_start = self.pseudo_rand.get();
+        self.pseudo_rand.set(rand_start + 1);
         loop {
-            for (i, entry) in self
-                .comms
-                .iter()
-                .enumerate()
-                .choose_multiple(&mut rng, count)
-            {
-                match entry {
-                    SelectComm::Send(c, val, _) => {
-                        match c.as_some_channel()?.chan.try_send(val.clone()) {
-                            Ok(_) => return Ok((i, None)),
+            for i in 0..count {
+                let index = (i + rand_start) % count;
+                let entry = &self.comms[index];
+                match &entry.typ {
+                    SelectCommType::Send(val) => {
+                        match entry.chan.as_some_channel()?.chan.try_send(val.clone()) {
+                            Ok(_) => return Ok((index, None)),
                             Err(e) => match e {
                                 async_channel::TrySendError::Full(_) => {}
                                 async_channel::TrySendError::Closed(_) => {
@@ -176,13 +190,15 @@ impl Selector {
                             },
                         }
                     }
-                    SelectComm::Recv(c, _, _) => match c.as_some_channel()?.chan.try_recv() {
-                        Ok(v) => return Ok((i, Some(v))),
-                        Err(e) => match e {
-                            async_channel::TryRecvError::Empty => {}
-                            async_channel::TryRecvError::Closed => return Ok((i, None)),
-                        },
-                    },
+                    SelectCommType::Recv(_, _) => {
+                        match entry.chan.as_some_channel()?.chan.try_recv() {
+                            Ok(v) => return Ok((index, Some(v))),
+                            Err(e) => match e {
+                                async_channel::TryRecvError::Empty => {}
+                                async_channel::TryRecvError::Closed => return Ok((index, None)),
+                            },
+                        }
+                    }
                 }
             }
 

@@ -3,10 +3,10 @@
 // license that can be found in the LICENSE file.
 
 use super::gc::GcoVec;
-pub use super::instruction::{OpIndex, ValueType};
 use super::metadata::*;
 pub use super::objects::*;
 use crate::channel::Channel;
+pub use crate::instruction::*;
 use ordered_float;
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
@@ -164,7 +164,7 @@ macro_rules! cmp_int_float {
 
 macro_rules! shift_int {
     ($t:ident, $a:ident, $b:ident, $op:tt) => {
-        *$a = match $t {
+        match $t {
             ValueType::Int => union_shift!($a, $b, int, $op),
             ValueType::Int8 => union_shift!($a, $b, int8, $op),
             ValueType::Int16 => union_shift!($a, $b, int16, $op),
@@ -621,103 +621,115 @@ impl ValueData {
     }
 
     #[inline]
-    pub fn cast_copyable(&mut self, from: ValueType, to: ValueType) {
+    pub fn cast_copyable(&self, from: ValueType, to: ValueType) -> ValueData {
+        let mut v = unsafe { self.copy_non_ptr() };
         match to {
-            ValueType::Int => convert_to_int!(self, from, int, isize),
-            ValueType::Int8 => convert_to_int!(self, from, int8, i8),
-            ValueType::Int16 => convert_to_int!(self, from, int16, i16),
-            ValueType::Int32 => convert_to_int!(self, from, int32, i32),
-            ValueType::Int64 => convert_to_int!(self, from, int64, i64),
-            ValueType::Uint => convert_to_int!(self, from, uint, usize),
-            ValueType::UintPtr => convert_to_int!(self, from, uint_ptr, usize),
-            ValueType::Uint8 => convert_to_int!(self, from, uint8, u8),
-            ValueType::Uint16 => convert_to_int!(self, from, uint16, u16),
-            ValueType::Uint32 => convert_to_int!(self, from, uint32, u32),
-            ValueType::Uint64 => convert_to_int!(self, from, uint64, u64),
-            ValueType::Float32 => convert_to_float!(self, from, float32, F32, f32),
-            ValueType::Float64 => convert_to_float!(self, from, float64, F64, f64),
+            ValueType::Int => convert_to_int!(&mut v, from, int, isize),
+            ValueType::Int8 => convert_to_int!(&mut v, from, int8, i8),
+            ValueType::Int16 => convert_to_int!(&mut v, from, int16, i16),
+            ValueType::Int32 => convert_to_int!(&mut v, from, int32, i32),
+            ValueType::Int64 => convert_to_int!(&mut v, from, int64, i64),
+            ValueType::Uint => convert_to_int!(&mut v, from, uint, usize),
+            ValueType::UintPtr => convert_to_int!(&mut v, from, uint_ptr, usize),
+            ValueType::Uint8 => convert_to_int!(&mut v, from, uint8, u8),
+            ValueType::Uint16 => convert_to_int!(&mut v, from, uint16, u16),
+            ValueType::Uint32 => convert_to_int!(&mut v, from, uint32, u32),
+            ValueType::Uint64 => convert_to_int!(&mut v, from, uint64, u64),
+            ValueType::Float32 => convert_to_float!(&mut v, from, float32, F32, f32),
+            ValueType::Float64 => convert_to_float!(&mut v, from, float64, F64, f64),
             _ => unreachable!(),
         }
+        v
     }
 
     #[inline]
-    pub fn unary_negate(&mut self, t: ValueType) {
+    pub fn unary_negate(&self, t: ValueType) -> ValueData {
+        let mut v = unsafe { self.copy_non_ptr() };
         match t {
-            ValueType::Int => self.int = -unsafe { self.int },
-            ValueType::Int8 => self.int8 = -unsafe { self.int8 },
-            ValueType::Int16 => self.int16 = -unsafe { self.int16 },
-            ValueType::Int32 => self.int32 = -unsafe { self.int32 },
-            ValueType::Int64 => self.int64 = -unsafe { self.int64 },
-            ValueType::Float32 => self.float32 = -unsafe { self.float32 },
-            ValueType::Float64 => self.float64 = -unsafe { self.float64 },
-            ValueType::Uint => self.uint = unsafe { (!0) ^ self.uint } + 1,
-            ValueType::Uint8 => self.uint8 = unsafe { (!0) ^ self.uint8 } + 1,
-            ValueType::Uint16 => self.uint16 = unsafe { (!0) ^ self.uint16 } + 1,
-            ValueType::Uint32 => self.uint32 = unsafe { (!0) ^ self.uint32 } + 1,
-            ValueType::Uint64 => self.uint64 = unsafe { (!0) ^ self.uint64 } + 1,
+            ValueType::Int => v.int = -unsafe { self.int },
+            ValueType::Int8 => v.int8 = -unsafe { self.int8 },
+            ValueType::Int16 => v.int16 = -unsafe { self.int16 },
+            ValueType::Int32 => v.int32 = -unsafe { self.int32 },
+            ValueType::Int64 => v.int64 = -unsafe { self.int64 },
+            ValueType::Float32 => v.float32 = -unsafe { self.float32 },
+            ValueType::Float64 => v.float64 = -unsafe { self.float64 },
+            ValueType::Uint => v.uint = unsafe { (!0) ^ self.uint } + 1,
+            ValueType::Uint8 => v.uint8 = unsafe { (!0) ^ self.uint8 } + 1,
+            ValueType::Uint16 => v.uint16 = unsafe { (!0) ^ self.uint16 } + 1,
+            ValueType::Uint32 => v.uint32 = unsafe { (!0) ^ self.uint32 } + 1,
+            ValueType::Uint64 => v.uint64 = unsafe { (!0) ^ self.uint64 } + 1,
             _ => unreachable!(),
-        }
+        };
+        v
     }
 
     #[inline]
-    pub fn unary_xor(&mut self, t: ValueType) {
+    pub fn unary_xor(&self, t: ValueType) -> ValueData {
+        let mut v = unsafe { self.copy_non_ptr() };
         match t {
-            ValueType::Uint => self.uint = unsafe { (!0) ^ self.uint },
-            ValueType::Uint8 => self.uint8 = unsafe { (!0) ^ self.uint8 },
-            ValueType::Uint16 => self.uint16 = unsafe { (!0) ^ self.uint16 },
-            ValueType::Uint32 => self.uint32 = unsafe { (!0) ^ self.uint32 },
-            ValueType::Uint64 => self.uint64 = unsafe { (!0) ^ self.uint64 },
-            ValueType::Int => self.int = unsafe { -1 ^ self.int },
-            ValueType::Int8 => self.int8 = unsafe { -1 ^ self.int8 },
-            ValueType::Int16 => self.int16 = unsafe { -1 ^ self.int16 },
-            ValueType::Int32 => self.int32 = unsafe { -1 ^ self.int32 },
-            ValueType::Int64 => self.int64 = unsafe { -1 ^ self.int64 },
+            ValueType::Uint => v.uint = unsafe { (!0) ^ self.uint },
+            ValueType::Uint8 => v.uint8 = unsafe { (!0) ^ self.uint8 },
+            ValueType::Uint16 => v.uint16 = unsafe { (!0) ^ self.uint16 },
+            ValueType::Uint32 => v.uint32 = unsafe { (!0) ^ self.uint32 },
+            ValueType::Uint64 => v.uint64 = unsafe { (!0) ^ self.uint64 },
+            ValueType::Int => v.int = unsafe { -1 ^ self.int },
+            ValueType::Int8 => v.int8 = unsafe { -1 ^ self.int8 },
+            ValueType::Int16 => v.int16 = unsafe { -1 ^ self.int16 },
+            ValueType::Int32 => v.int32 = unsafe { -1 ^ self.int32 },
+            ValueType::Int64 => v.int64 = unsafe { -1 ^ self.int64 },
             _ => unreachable!(),
         }
+        v
     }
 
     #[inline]
-    pub fn unary_not(&mut self, t: ValueType) {
+    pub fn logical_not(&self, t: ValueType) -> ValueData {
         debug_assert!(t == ValueType::Bool);
-        self.boolean = unsafe { !self.boolean };
+        let mut v = unsafe { self.copy_non_ptr() };
+        v.boolean = unsafe { !self.boolean };
+        v
     }
 
     #[inline]
-    pub fn inc(&mut self, t: ValueType) {
+    pub fn inc(&self, t: ValueType) -> ValueData {
+        let mut v = unsafe { self.copy_non_ptr() };
         match t {
-            ValueType::Int => self.int = unsafe { self.int } + 1,
-            ValueType::Int8 => self.int8 = unsafe { self.int8 } + 1,
-            ValueType::Int16 => self.int16 = unsafe { self.int16 } + 1,
-            ValueType::Int32 => self.int32 = unsafe { self.int32 } + 1,
-            ValueType::Int64 => self.int64 = unsafe { self.int64 } + 1,
-            ValueType::Float32 => self.float32 = unsafe { self.float32 } + 1.0,
-            ValueType::Float64 => self.float64 = unsafe { self.float64 } + 1.0,
-            ValueType::Uint => self.uint = unsafe { self.uint } + 1,
-            ValueType::Uint8 => self.uint8 = unsafe { self.uint8 } + 1,
-            ValueType::Uint16 => self.uint16 = unsafe { self.uint16 } + 1,
-            ValueType::Uint32 => self.uint32 = unsafe { self.uint32 } + 1,
-            ValueType::Uint64 => self.uint64 = unsafe { self.uint64 } + 1,
+            ValueType::Int => v.int = unsafe { self.int } + 1,
+            ValueType::Int8 => v.int8 = unsafe { self.int8 } + 1,
+            ValueType::Int16 => v.int16 = unsafe { self.int16 } + 1,
+            ValueType::Int32 => v.int32 = unsafe { self.int32 } + 1,
+            ValueType::Int64 => v.int64 = unsafe { self.int64 } + 1,
+            ValueType::Float32 => v.float32 = unsafe { self.float32 } + 1.0,
+            ValueType::Float64 => v.float64 = unsafe { self.float64 } + 1.0,
+            ValueType::Uint => v.uint = unsafe { self.uint } + 1,
+            ValueType::Uint8 => v.uint8 = unsafe { self.uint8 } + 1,
+            ValueType::Uint16 => v.uint16 = unsafe { self.uint16 } + 1,
+            ValueType::Uint32 => v.uint32 = unsafe { self.uint32 } + 1,
+            ValueType::Uint64 => v.uint64 = unsafe { self.uint64 } + 1,
             _ => unreachable!(),
-        }
+        };
+        v
     }
 
     #[inline]
-    pub fn dec(&mut self, t: ValueType) {
+    pub fn dec(&self, t: ValueType) -> ValueData {
+        let mut v = unsafe { self.copy_non_ptr() };
         match t {
-            ValueType::Int => self.int = unsafe { self.int } - 1,
-            ValueType::Int8 => self.int8 = unsafe { self.int8 } - 1,
-            ValueType::Int16 => self.int16 = unsafe { self.int16 } - 1,
-            ValueType::Int32 => self.int32 = unsafe { self.int32 } - 1,
-            ValueType::Int64 => self.int64 = unsafe { self.int64 } - 1,
-            ValueType::Float32 => self.float32 = unsafe { self.float32 } - 1.0,
-            ValueType::Float64 => self.float64 = unsafe { self.float64 } - 1.0,
-            ValueType::Uint => self.uint = unsafe { self.uint } - 1,
-            ValueType::Uint8 => self.uint8 = unsafe { self.uint8 } - 1,
-            ValueType::Uint16 => self.uint16 = unsafe { self.uint16 } - 1,
-            ValueType::Uint32 => self.uint32 = unsafe { self.uint32 } - 1,
-            ValueType::Uint64 => self.uint64 = unsafe { self.uint64 } - 1,
+            ValueType::Int => v.int = unsafe { self.int } - 1,
+            ValueType::Int8 => v.int8 = unsafe { self.int8 } - 1,
+            ValueType::Int16 => v.int16 = unsafe { self.int16 } - 1,
+            ValueType::Int32 => v.int32 = unsafe { self.int32 } - 1,
+            ValueType::Int64 => v.int64 = unsafe { self.int64 } - 1,
+            ValueType::Float32 => v.float32 = unsafe { self.float32 } - 1.0,
+            ValueType::Float64 => v.float64 = unsafe { self.float64 } - 1.0,
+            ValueType::Uint => v.uint = unsafe { self.uint } - 1,
+            ValueType::Uint8 => v.uint8 = unsafe { self.uint8 } - 1,
+            ValueType::Uint16 => v.uint16 = unsafe { self.uint16 } - 1,
+            ValueType::Uint32 => v.uint32 = unsafe { self.uint32 } - 1,
+            ValueType::Uint64 => v.uint64 = unsafe { self.uint64 } - 1,
             _ => unreachable!(),
-        }
+        };
+        v
     }
 
     #[inline]
@@ -761,12 +773,12 @@ impl ValueData {
     }
 
     #[inline]
-    pub fn binary_op_shl(&mut self, b: &u32, t: ValueType) {
+    pub fn binary_op_shl(&self, b: &u32, t: ValueType) -> ValueData {
         unsafe { shift_int!(t, self, b, checked_shl) }
     }
 
     #[inline]
-    pub fn binary_op_shr(&mut self, b: &u32, t: ValueType) {
+    pub fn binary_op_shr(&self, b: &u32, t: ValueType) -> ValueData {
         unsafe { shift_int!(t, self, b, checked_shr) }
     }
 
@@ -810,33 +822,33 @@ impl ValueData {
     }
 
     #[inline]
-    pub fn compare_eql(a: &ValueData, b: &ValueData, t: ValueType) -> bool {
-        unsafe { cmp_bool_int_float!(t, a, b, ==) }
+    pub fn compare_eql(&self, b: &ValueData, t: ValueType) -> bool {
+        unsafe { cmp_bool_int_float!(t, self, b, ==) }
     }
 
     #[inline]
-    pub fn compare_neq(a: &ValueData, b: &ValueData, t: ValueType) -> bool {
-        unsafe { cmp_bool_int_float!(t, a, b, !=) }
+    pub fn compare_neq(&self, b: &ValueData, t: ValueType) -> bool {
+        unsafe { cmp_bool_int_float!(t, self, b, !=) }
     }
 
     #[inline]
-    pub fn compare_lss(a: &ValueData, b: &ValueData, t: ValueType) -> bool {
-        unsafe { cmp_int_float!(t, a, b, <) }
+    pub fn compare_lss(&self, b: &ValueData, t: ValueType) -> bool {
+        unsafe { cmp_int_float!(t, self, b, <) }
     }
 
     #[inline]
-    pub fn compare_gtr(a: &ValueData, b: &ValueData, t: ValueType) -> bool {
-        unsafe { cmp_int_float!(t, a, b, >) }
+    pub fn compare_gtr(&self, b: &ValueData, t: ValueType) -> bool {
+        unsafe { cmp_int_float!(t, self, b, >) }
     }
 
     #[inline]
-    pub fn compare_leq(a: &ValueData, b: &ValueData, t: ValueType) -> bool {
-        unsafe { cmp_int_float!(t, a, b, <=) }
+    pub fn compare_leq(&self, b: &ValueData, t: ValueType) -> bool {
+        unsafe { cmp_int_float!(t, self, b, <=) }
     }
 
     #[inline]
-    pub fn compare_geq(a: &ValueData, b: &ValueData, t: ValueType) -> bool {
-        unsafe { cmp_int_float!(t, a, b, >=) }
+    pub fn compare_geq(&self, b: &ValueData, t: ValueType) -> bool {
+        unsafe { cmp_int_float!(t, self, b, >=) }
     }
 
     #[inline]
@@ -876,13 +888,24 @@ impl ValueData {
             ValueType::Package => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_package()),
             ValueType::Metadata => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_metadata()),
             ValueType::Complex128 => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_complex128()),
-            ValueType::String => dispatcher_a_s_for(t_elem).slice_debug_fmt(self, f),
-            ValueType::Array => dispatcher_a_s_for(t_elem).array_debug_fmt(self, f),
+            ValueType::String => write!(
+                f,
+                "Type: {:?}, Data: {:#?}",
+                t,
+                StrUtil::as_str(&self.clone(t).into_string())
+            ),
+            ValueType::Array => match t_elem {
+                ValueType::Void => write!(f, "Type: {:?}, Data: {:?}", t, "unknown"),
+                _ => dispatcher_a_s_for(t_elem).array_debug_fmt(self, f),
+            },
             ValueType::Struct => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_struct()),
             ValueType::Pointer => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_pointer()),
             ValueType::UnsafePtr => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_unsafe_ptr()),
             ValueType::Closure => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_closure()),
-            ValueType::Slice => dispatcher_a_s_for(t_elem).slice_debug_fmt(self, f),
+            ValueType::Slice => match t_elem {
+                ValueType::Void => write!(f, "Type: {:?}, Data: {:?}", t, "unknown"),
+                _ => dispatcher_a_s_for(t_elem).slice_debug_fmt(self, f),
+            },
             ValueType::Map => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_map()),
             ValueType::Interface => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_interface()),
             ValueType::Channel => write!(f, "Type: {:?}, Data: {:#?}", t, self.as_channel()),
@@ -1052,8 +1075,12 @@ impl ValueData {
     }
 
     #[inline]
-    fn new_closure_static(fkey: FunctionKey, fobjs: &FunctionObjs) -> ValueData {
-        let obj = ClosureObj::new_gos(fkey, fobjs, None);
+    fn new_closure_static(
+        func: FunctionKey,
+        up_ptrs: Option<&Vec<ValueDesc>>,
+        meta: Meta,
+    ) -> ValueData {
+        let obj = ClosureObj::new_gos(func, up_ptrs, None, meta);
         ValueData::from_closure(Some(Rc::new((obj, Cell::new(0)))))
     }
 
@@ -1472,10 +1499,14 @@ impl GosValue {
     }
 
     #[inline]
-    pub fn new_closure_static(fkey: FunctionKey, fobjs: &FunctionObjs) -> GosValue {
+    pub fn new_closure_static(
+        func: FunctionKey,
+        up_ptrs: Option<&Vec<ValueDesc>>,
+        meta: Meta,
+    ) -> GosValue {
         GosValue::new(
             ValueType::Closure,
-            ValueData::new_closure_static(fkey, fobjs),
+            ValueData::new_closure_static(func, up_ptrs, meta),
         )
     }
 
@@ -1488,8 +1519,8 @@ impl GosValue {
     }
 
     #[inline]
-    pub fn new_map(obj: MapObj, gcv: &GcoVec) -> GosValue {
-        let data = ValueData::new_map(obj, gcv);
+    pub fn new_map(gcv: &GcoVec) -> GosValue {
+        let data = ValueData::new_map(MapObj::new(), gcv);
         GosValue::new(ValueType::Map, data)
     }
 
@@ -1554,11 +1585,6 @@ impl GosValue {
         t_elem: ValueType,
     ) -> RuntimeResult<GosValue> {
         dispatcher_a_s_for(t_elem).slice_array(arr, begin, end)
-    }
-
-    #[inline]
-    pub fn map_with_default_val(default_val: GosValue, gcv: &GcoVec) -> GosValue {
-        GosValue::new_map(MapObj::new(default_val), gcv)
     }
 
     #[inline]
@@ -1910,7 +1936,7 @@ impl GosValue {
 
     #[inline]
     pub fn as_slice<T>(&self) -> Option<&(SliceObj<T>, RCount)> {
-        debug_assert!(self.typ == ValueType::Slice);
+        debug_assert!(self.typ == ValueType::Slice || self.typ == ValueType::String);
         self.data.as_slice::<T>()
     }
 
@@ -1974,6 +2000,14 @@ impl GosValue {
     }
 
     #[inline]
+    pub fn slice_array_equivalent(&self, index: usize) -> RuntimeResult<(&GosValue, usize)> {
+        Ok(self
+            .as_some_slice::<AnyElem>()?
+            .0
+            .get_array_equivalent(index))
+    }
+
+    #[inline]
     pub fn int32_as(i: i32, t: ValueType) -> GosValue {
         GosValue::new(t, ValueData::int32_as(i, t))
     }
@@ -2015,9 +2049,9 @@ impl GosValue {
     }
 
     #[inline]
-    pub fn cast_copyable(&mut self, from: ValueType, to: ValueType) {
+    pub fn cast_copyable(&self, from: ValueType, to: ValueType) -> GosValue {
         assert!(from.copyable());
-        self.data.cast_copyable(from, to)
+        GosValue::new(to, self.data.cast_copyable(from, to))
     }
 
     #[inline]
@@ -2050,54 +2084,6 @@ impl GosValue {
     #[inline]
     pub fn identical(&self, other: &GosValue) -> bool {
         self.typ() == other.typ() && self == other
-    }
-
-    #[inline]
-    pub fn load_index(&self, ind: &GosValue, gcv: &GcoVec) -> RuntimeResult<GosValue> {
-        match self.typ {
-            ValueType::Map => Ok(self.as_some_map()?.0.get(&ind, gcv).0.clone()),
-            ValueType::Slice => {
-                let index = ind.as_index();
-                self.dispatcher_a_s().slice_get(self, index)
-            }
-            ValueType::String => {
-                let index = ind.as_index();
-                StrUtil::index(self.as_string(), index)
-            }
-            ValueType::Array => {
-                let index = ind.as_index();
-                self.dispatcher_a_s().array_get(self, index)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[inline]
-    pub fn load_index_int(&self, i: usize, gcv: &GcoVec) -> RuntimeResult<GosValue> {
-        match self.typ {
-            ValueType::Slice => self.dispatcher_a_s().slice_get(self, i),
-            ValueType::Map => {
-                let ind = GosValue::new_int(i as isize);
-                Ok(self.as_some_map()?.0.get(&ind, gcv).0.clone())
-            }
-            ValueType::String => StrUtil::index(self.as_string(), i),
-            ValueType::Array => self.dispatcher_a_s().array_get(self, i),
-            _ => {
-                unreachable!();
-            }
-        }
-    }
-
-    #[inline]
-    pub fn load_field(&self, ind: &GosValue, objs: &VMObjects) -> GosValue {
-        match self.typ {
-            ValueType::Struct => self.as_struct().0.borrow_fields()[*ind.as_int() as usize].clone(),
-            ValueType::Package => {
-                let pkg = &objs.packages[*self.as_package()];
-                pkg.member(*ind.as_int() as OpIndex).clone()
-            }
-            _ => unreachable!(),
-        }
     }
 
     #[inline]
@@ -2199,12 +2185,12 @@ impl GosValue {
     }
 
     #[inline]
-    pub unsafe fn cast(&self, new_type: ValueType) -> GosValue {
+    pub(crate) fn cast(&self, new_type: ValueType) -> GosValue {
         GosValue::new(new_type, self.data.clone(self.typ))
     }
 
     #[inline]
-    fn new(typ: ValueType, data: ValueData) -> GosValue {
+    pub(crate) fn new(typ: ValueType, data: ValueData) -> GosValue {
         debug_assert!(typ != ValueType::Slice && typ != ValueType::Array);
         GosValue {
             typ: typ,
@@ -2324,7 +2310,11 @@ impl Hash for GosValue {
                 Some(p) => PointerObj::hash(&p, state),
                 None => 0.hash(state),
             },
-            _ => unreachable!(),
+            ValueType::Metadata => self.as_metadata().hash(state),
+            _ => {
+                dbg!(self.typ);
+                unreachable!();
+            }
         }
     }
 }

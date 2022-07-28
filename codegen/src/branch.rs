@@ -5,26 +5,27 @@
 /// Helper for patching branch points
 ///
 ///
+use crate::context::*;
 use goscript_parser::ast::*;
+use goscript_parser::objects::AssignStmtKey;
 use goscript_parser::token::Token;
-use goscript_vm::instruction::*;
+use goscript_types::ObjKey as TCObjKey;
 use goscript_vm::value::*;
-use slotmap::KeyData;
 use std::collections::HashMap;
 
 /// branch points of break and continue
 pub struct BranchBlock {
-    points: Vec<(usize, Token, Option<KeyData>)>,
-    label: Option<KeyData>,
+    points: Vec<(usize, Token, Option<TCObjKey>)>,
+    label: Option<TCObjKey>,
     is_loop: bool,
 }
 
 impl BranchBlock {
-    pub fn new(label: Option<KeyData>, is_loop: bool) -> BranchBlock {
+    pub fn new(label: Option<TCObjKey>, is_loop: bool) -> BranchBlock {
         BranchBlock {
             points: vec![],
-            label: label,
-            is_loop: is_loop,
+            label,
+            is_loop,
         }
     }
 }
@@ -32,9 +33,8 @@ impl BranchBlock {
 /// helper for break, continue and goto
 pub struct BranchHelper {
     block_stack: Vec<BranchBlock>,
-    next_block_label: Option<KeyData>,
-    labels: HashMap<KeyData, usize>,
-    go_tos: HashMap<(FunctionKey, usize), KeyData>,
+    next_block_label: Option<TCObjKey>,
+    labels: HashMap<TCObjKey, usize>,
 }
 
 impl BranchHelper {
@@ -43,19 +43,29 @@ impl BranchHelper {
             block_stack: vec![],
             next_block_label: None,
             labels: HashMap::new(),
-            go_tos: HashMap::new(),
         }
     }
 
-    pub fn add_point(
+    pub fn labels(&self) -> &HashMap<TCObjKey, usize> {
+        &self.labels
+    }
+
+    pub fn add_label(&mut self, label: TCObjKey, offset: usize, is_breakable: bool) {
+        self.labels.insert(label, offset);
+        if is_breakable {
+            self.next_block_label = Some(label);
+        }
+    }
+
+    pub fn add_jump_point(
         &mut self,
-        func: &mut FunctionVal,
+        fctx: &mut FuncCtx,
         token: Token,
-        label: Option<KeyData>,
+        label: Option<TCObjKey>,
         pos: usize,
     ) {
-        let index = func.code().len();
-        func.emit_code_with_imm(Opcode::JUMP, 0, Some(pos));
+        let index = fctx.next_code_index();
+        fctx.emit_jump(0, Some(pos));
         self.block_stack
             .last_mut()
             .unwrap()
@@ -63,48 +73,13 @@ impl BranchHelper {
             .push((index, token, label));
     }
 
-    pub fn add_label(&mut self, label: KeyData, offset: usize, is_breakable: bool) {
-        self.labels.insert(label, offset);
-        if is_breakable {
-            self.next_block_label = Some(label);
-        }
-    }
-
-    pub fn go_to(
-        &mut self,
-        funcs: &mut FunctionObjs,
-        fkey: FunctionKey,
-        label: KeyData,
-        pos: usize,
-    ) {
-        let func = &mut funcs[fkey];
-        let current_offset = func.code().len();
-        let jump_to = match self.labels.get(&label) {
-            Some(l_offset) => (*l_offset as OpIndex) - (current_offset as OpIndex) - 1,
-            None => {
-                self.go_tos.insert((fkey, current_offset), label);
-                0
-            }
-        };
-        func.emit_code_with_imm(Opcode::JUMP, jump_to, Some(pos));
-    }
-
-    pub fn patch_go_tos(&self, funcs: &mut FunctionObjs) {
-        for ((fkey, patch_offset), label) in self.go_tos.iter() {
-            let func = &mut funcs[*fkey];
-            let l_offset = self.labels[label];
-            let offset = (l_offset as OpIndex) - (*patch_offset as OpIndex) - 1;
-            func.instruction_mut(*patch_offset).set_imm(offset);
-        }
-    }
-
     pub fn enter_block(&mut self, is_loop: bool) {
         self.block_stack
             .push(BranchBlock::new(self.next_block_label.take(), is_loop))
     }
 
-    pub fn leave_block(&mut self, func: &mut FunctionVal, begin: Option<usize>) {
-        let end = func.next_code_index();
+    pub fn leave_block(&mut self, fctx: &mut FuncCtx, begin: Option<usize>) {
+        let end = fctx.next_code_index();
         let block = self.block_stack.pop().unwrap();
         for (index, token, label) in block.points.into_iter() {
             let label_match = label.is_none() || label == block.label;
@@ -117,8 +92,7 @@ impl BranchHelper {
             };
             if label_match && break_this {
                 let current_pc = index as OpIndex + 1;
-                func.instruction_mut(index)
-                    .set_imm(target.unwrap() as OpIndex - current_pc);
+                fctx.inst_mut(index).d = Addr::Imm(target.unwrap() as OpIndex - current_pc);
             } else {
                 // this break/continue tries to jump out of an outer block
                 // so we add it to outer block's jump out points
@@ -157,17 +131,15 @@ impl SwitchJumpPoints {
         self.default = Some(index)
     }
 
-    pub fn patch_case(&mut self, func: &mut FunctionVal, case: usize, loc: usize) {
+    pub fn patch_case(&mut self, func: &mut FuncCtx, case: usize, loc: usize) {
         for i in self.cases[case].iter() {
-            let imm = (loc - i) as OpIndex - 1;
-            func.instruction_mut(*i).set_imm(imm);
+            func.inst_mut(*i).d = Addr::Imm((loc - i) as OpIndex - 1);
         }
     }
 
-    pub fn patch_default(&mut self, func: &mut FunctionVal, loc: usize) {
+    pub fn patch_default(&mut self, func: &mut FuncCtx, loc: usize) {
         if let Some(de) = self.default {
-            let imm = (loc - de) as OpIndex - 1;
-            func.instruction_mut(de).set_imm(imm);
+            func.inst_mut(de).d = Addr::Imm((loc - de) as OpIndex - 1);
         }
     }
 }
@@ -192,7 +164,7 @@ impl SwitchHelper {
         self.ends.add_case_clause();
     }
 
-    pub fn patch_ends(&mut self, func: &mut FunctionVal, loc: usize) {
+    pub fn patch_ends(&mut self, func: &mut FuncCtx, loc: usize) {
         for i in 0..self.ends.cases.len() {
             self.ends.patch_case(func, i, loc);
         }
@@ -215,51 +187,67 @@ impl SwitchHelper {
     }
 }
 
-pub enum CommType<'a> {
-    Send(ValueType),
+pub enum CommType {
+    Send(Addr),
     RecvNoLhs,
-    Recv(&'a AssignStmt),
-    RecvCommaOk(&'a AssignStmt),
+    Recv(AssignStmtKey, Addr, bool),
     Default,
 }
 
-pub struct SelectComm<'a> {
-    typ: CommType<'a>,
-    pos: usize,
-    begin: usize,
-    end: usize,
-}
-
-impl<'a> SelectComm<'a> {
-    pub fn new(typ: CommType, pos: usize) -> SelectComm {
-        SelectComm {
-            typ: typ,
-            pos: pos,
-            begin: 0,
-            end: 0,
+impl CommType {
+    pub fn runtime_flag(&self) -> ValueType {
+        match self {
+            Self::Send(_) => ValueType::FlagA,
+            Self::RecvNoLhs => ValueType::FlagB,
+            Self::Recv(_, _, ok) => {
+                if !ok {
+                    ValueType::FlagC
+                } else {
+                    ValueType::FlagD
+                }
+            }
+            Self::Default => ValueType::FlagE,
         }
     }
 }
 
-pub struct SelectHelper<'a> {
-    comms: Vec<SelectComm<'a>>,
-    select_offset: usize,
+pub struct SelectComm {
+    typ: CommType,
+    chan_addr: Option<Addr>,
+    pos: usize,
+    begin: usize,
+    end: usize,
+    offset: usize,
 }
 
-impl<'a> SelectHelper<'a> {
-    pub fn new() -> SelectHelper<'a> {
-        SelectHelper {
-            comms: vec![],
-            select_offset: 0,
+impl SelectComm {
+    pub fn new(typ: CommType, chan_addr: Option<Addr>, pos: usize) -> SelectComm {
+        SelectComm {
+            typ,
+            chan_addr,
+            pos,
+            begin: 0,
+            end: 0,
+            offset: 0,
         }
+    }
+}
+
+pub struct SelectHelper {
+    comms: Vec<SelectComm>,
+}
+
+impl SelectHelper {
+    pub fn new() -> SelectHelper {
+        SelectHelper { comms: vec![] }
     }
 
     pub fn comm_type(&self, i: usize) -> &CommType {
         &self.comms[i].typ
     }
 
-    pub fn add_comm(&mut self, typ: CommType<'a>, pos: usize) {
-        self.comms.push(SelectComm::new(typ, pos));
+    pub fn add_comm(&mut self, typ: CommType, chan_addr: Option<Addr>, pos: usize) {
+        self.comms.push(SelectComm::new(typ, chan_addr, pos));
     }
 
     pub fn set_block_begin_end(&mut self, i: usize, begin: usize, end: usize) {
@@ -268,39 +256,71 @@ impl<'a> SelectHelper<'a> {
         comm.end = end;
     }
 
-    pub fn emit_select(&mut self, func: &mut FunctionVal) {
-        self.select_offset = func.next_code_index();
-        for comm in self.comms.iter() {
-            let (flag, t) = match &comm.typ {
-                CommType::Send(t) => (ValueType::FlagA, Some(*t)),
-                CommType::RecvNoLhs => (ValueType::FlagB, None),
-                CommType::Recv(_) => (ValueType::FlagC, None),
-                CommType::RecvCommaOk(_) => (ValueType::FlagD, None),
-                CommType::Default => (ValueType::FlagE, None),
+    pub fn emit_select(&mut self, fctx: &mut FuncCtx, pos: Option<usize>) {
+        let default_flag = self.comms.last().unwrap().typ.runtime_flag();
+        let count = self.comms.len()
+            - if default_flag == ValueType::FlagE {
+                1
+            } else {
+                0
             };
-            func.emit_code_with_type2(Opcode::SELECT, flag, t, Some(comm.pos));
+        let select_offset = fctx.next_code_index();
+        fctx.emit_inst(
+            InterInst::with_op_t_index(
+                Opcode::SELECT,
+                Some(default_flag),
+                None,
+                Addr::Void,
+                Addr::Imm(count as OpIndex),
+                Addr::Void,
+            ),
+            pos,
+        );
+
+        for comm in self.comms.iter_mut() {
+            comm.offset = fctx.next_code_index();
+            let flag = comm.typ.runtime_flag();
+            match &comm.typ {
+                CommType::Send(val) | CommType::Recv(_, val, _) => fctx.emit_inst(
+                    InterInst::with_op_t_index(
+                        Opcode::VOID,
+                        Some(flag),
+                        None,
+                        Addr::Void,
+                        comm.chan_addr.unwrap(),
+                        *val,
+                    ),
+                    Some(comm.pos),
+                ),
+                CommType::RecvNoLhs => fctx.emit_inst(
+                    InterInst::with_op_t_index(
+                        Opcode::VOID,
+                        Some(flag),
+                        None,
+                        Addr::Void,
+                        comm.chan_addr.unwrap(),
+                        Addr::Void,
+                    ),
+                    Some(comm.pos),
+                ),
+                CommType::Default => comm.offset = select_offset,
+            };
         }
     }
 
-    pub fn patch_select(&self, func: &mut FunctionVal) {
-        let count = self.comms.len();
-        let offset = self.select_offset;
+    pub fn patch_select(&self, fctx: &mut FuncCtx) {
         let blocks_begin = self.comms.first().unwrap().begin as OpIndex;
         let blocks_end = self.comms.last().unwrap().end as OpIndex;
         // set the block offset for each block.
-        // the first block's offset is known(0) so the space is used for
-        // the count of blocks.
-        func.instruction_mut(offset).set_imm(count as OpIndex);
-        for i in 1..count {
-            let diff = self.comms[i].begin as OpIndex - blocks_begin;
-            func.instruction_mut(offset + i).set_imm(diff);
+        for comm in self.comms.iter() {
+            let diff = comm.begin as OpIndex - blocks_begin;
+            fctx.inst_mut(comm.offset).d = Addr::Imm(diff);
         }
-
         // set where to jump when the block ends
-        for i in 0..count - 1 {
-            let block_end = self.comms[i].end;
+        for comm in self.comms[..self.comms.len() - 1].iter() {
+            let block_end = comm.end;
             let diff = blocks_end - block_end as OpIndex;
-            func.instruction_mut(block_end).set_imm(diff);
+            fctx.inst_mut(block_end).d = Addr::Imm(diff);
         }
     }
 

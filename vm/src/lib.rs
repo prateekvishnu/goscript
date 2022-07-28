@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//pub mod instruction;
 pub mod instruction;
 
 #[macro_use]
@@ -15,9 +16,8 @@ pub mod ffi;
 
 pub mod value;
 
-mod stack;
+pub mod stack;
 
-#[macro_use]
 pub mod vm;
 
 pub mod gc;

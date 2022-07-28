@@ -8,7 +8,8 @@ use goscript_parser::ast::{Expr, NodeId};
 use goscript_parser::objects::IdentKey;
 use goscript_types::{
     BasicType, ChanDir, ConstValue, EntityType, ObjKey as TCObjKey, OperandMode,
-    PackageKey as TCPackageKey, TCObjects, Type, TypeInfo, TypeKey as TCTypeKey,
+    PackageKey as TCPackageKey, SelectionKind as TCSelectionKind, TCObjects, Type, TypeInfo,
+    TypeKey as TCTypeKey,
 };
 use goscript_vm::gc::GcoVec;
 use goscript_vm::instruction::ValueType;
@@ -36,12 +37,12 @@ impl<'a> TypeLookup<'a> {
     pub fn new(
         tc_objs: &'a TCObjects,
         ti: &'a TypeInfo,
-        cache: &'a mut TypeCache,
+        types_cache: &'a mut TypeCache,
     ) -> TypeLookup<'a> {
         TypeLookup {
-            tc_objs: tc_objs,
-            ti: ti,
-            types_cache: cache,
+            tc_objs,
+            ti,
+            types_cache,
         }
     }
 
@@ -51,21 +52,21 @@ impl<'a> TypeLookup<'a> {
     }
 
     #[inline]
-    pub fn try_tc_const_value(&mut self, id: NodeId) -> Option<&ConstValue> {
+    pub fn try_tc_const_value(&self, id: NodeId) -> Option<&ConstValue> {
         let typ_val = self.ti.types.get(&id).unwrap();
         typ_val.get_const_val()
     }
 
     #[inline]
-    pub fn const_value(&mut self, id: NodeId) -> GosValue {
+    pub fn const_type_value(&self, id: NodeId) -> (TCTypeKey, GosValue) {
         let typ_val = self.ti.types.get(&id).unwrap();
         let const_val = typ_val.get_const_val().unwrap();
         let (v, _) = self.const_value_type(typ_val.typ, const_val);
-        v
+        (typ_val.typ, v)
     }
 
     #[inline]
-    pub fn ident_const_value_type(&mut self, id: &IdentKey) -> (GosValue, ValueType) {
+    pub fn ident_const_value_type(&self, id: &IdentKey) -> (GosValue, ValueType) {
         let lobj_key = self.ti.defs[id].unwrap();
         let lobj = &self.tc_objs.lobjs[lobj_key];
         let tkey = lobj.typ().unwrap();
@@ -149,7 +150,7 @@ impl<'a> TypeLookup<'a> {
         }
     }
 
-    pub fn expr_value_type(&mut self, e: &Expr) -> ValueType {
+    pub fn expr_value_type(&self, e: &Expr) -> ValueType {
         let tv = self.ti.types.get(&e.id()).unwrap();
         if tv.mode == OperandMode::TypeExpr {
             ValueType::Metadata
@@ -164,15 +165,24 @@ impl<'a> TypeLookup<'a> {
         e: &Expr,
         vm_objs: &mut VMObjects,
         dummy_gcv: &mut GcoVec,
-    ) -> (ValueType, ValueType) {
+    ) -> (ValueType, TCTypeKey) {
         let tc_type = self.expr_tc_type(&e);
         let typ = self.tc_objs.types[tc_type].underlying().unwrap_or(tc_type);
         let meta = self.tc_type_to_meta(typ, vm_objs, dummy_gcv);
         let metas = &vm_objs.metas;
         match &metas[meta.key] {
-            MetadataType::Array(m, _) => (ValueType::Array, m.value_type(&metas)),
-            MetadataType::Slice(m) => (ValueType::Slice, m.value_type(&metas)),
-            MetadataType::Str(_) => (ValueType::String, ValueType::Uint8),
+            MetadataType::Array(_, _) => (
+                ValueType::Array,
+                self.tc_objs.types[typ].try_as_array().unwrap().elem(),
+            ),
+            MetadataType::Slice(_) => (
+                ValueType::Slice,
+                self.tc_objs.types[typ].try_as_slice().unwrap().elem(),
+            ),
+            MetadataType::Str(_) => (
+                ValueType::String,
+                self.tc_objs.universe().types()[&BasicType::Uint8],
+            ),
             _ => unreachable!(),
         }
     }
@@ -249,36 +259,37 @@ impl<'a> TypeLookup<'a> {
     }
 
     #[inline]
-    pub fn expr_range_tc_types(&mut self, e: &Expr) -> [TCTypeKey; 3] {
+    pub fn expr_range_tc_types(&self, e: &Expr) -> [TCTypeKey; 3] {
         let typ = self.ti.types.get(&e.id()).unwrap().typ;
         self.range_tc_types(typ)
     }
 
     #[inline]
-    pub fn expr_tuple_tc_types(&mut self, e: &Expr) -> Vec<TCTypeKey> {
+    pub fn expr_tuple_tc_types(&self, e: &Expr) -> Vec<TCTypeKey> {
         let typ = self.ti.types.get(&e.id()).unwrap().typ;
         self.tuple_tc_types(typ)
     }
 
     pub fn selection_vtypes_indices_sel_typ(
-        &mut self,
+        &self,
         id: NodeId,
-    ) -> (ValueType, ValueType, &Vec<usize>, SelectionType) {
+    ) -> (TCTypeKey, TCTypeKey, &Vec<usize>, SelectionType) {
         let sel = &self.ti.selections[&id];
-        let t0 = self.tc_type_to_value_type(sel.recv().unwrap());
+        let recv_type = sel.recv().unwrap();
         let obj = &self.tc_objs.lobjs[sel.obj()];
-        let t1 = self.tc_type_to_value_type(obj.typ().unwrap());
-        let sel_typ = match t1 {
-            ValueType::Closure => match obj.entity_type() {
+        let expr_type = obj.typ().unwrap();
+        let sel_typ = if self.tc_objs.types[expr_type].try_as_signature().is_some() {
+            match obj.entity_type() {
                 EntityType::Func(ptr_recv) => match ptr_recv {
                     true => SelectionType::MethodPtrRecv,
                     false => SelectionType::MethodNonPtrRecv,
                 },
                 _ => SelectionType::NonMethod,
-            },
-            _ => SelectionType::NonMethod,
+            }
+        } else {
+            SelectionType::NonMethod
         };
-        (t0, t1, &sel.indices(), sel_typ)
+        (recv_type, expr_type, &sel.indices(), sel_typ)
     }
 
     pub fn tc_type_to_meta(
@@ -294,7 +305,7 @@ impl<'a> TypeLookup<'a> {
         self.types_cache.get(&typ).unwrap().clone()
     }
 
-    pub fn sig_params_tc_types(&mut self, func: TCTypeKey) -> (Vec<TCTypeKey>, Option<TCTypeKey>) {
+    pub fn sig_params_tc_types(&self, func: TCTypeKey) -> (Vec<TCTypeKey>, Option<TCTypeKey>) {
         let typ = &self.tc_objs.types[func].underlying_val(self.tc_objs);
         let sig = typ.try_as_signature().unwrap();
         let params: Vec<TCTypeKey> = self.tc_objs.types[sig.params()]
@@ -320,10 +331,23 @@ impl<'a> TypeLookup<'a> {
         (params, variadic)
     }
 
-    pub fn sig_returns_tc_types(&mut self, func: TCTypeKey) -> Vec<TCTypeKey> {
+    pub fn sig_returns_tc_types(&self, func: TCTypeKey) -> Vec<TCTypeKey> {
         let typ = &self.tc_objs.types[func].underlying_val(self.tc_objs);
         let sig = typ.try_as_signature().unwrap();
         self.tuple_tc_types(sig.results())
+    }
+
+    pub fn is_method(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Selector(sel_expr) => match self.ti.selections.get(&sel_expr.id()) {
+                Some(sel) => match sel.kind() {
+                    TCSelectionKind::MethodVal => true,
+                    _ => false,
+                },
+                None => false,
+            },
+            _ => false,
+        }
     }
 
     // returns vm_type(metadata) for the tc_type
@@ -603,6 +627,31 @@ impl<'a> TypeLookup<'a> {
         }
     }
 
+    pub fn pointer_point_to_type(&self, typ: TCTypeKey) -> ValueType {
+        match &self.tc_objs.types[typ] {
+            Type::Pointer(p) => self.tc_type_to_value_type(p.base()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn slice_elem_type(&self, typ: TCTypeKey) -> ValueType {
+        match &self.tc_objs.types[typ] {
+            Type::Slice(s) => self.tc_type_to_value_type(s.elem()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn bool_tc_type(&self) -> TCTypeKey {
+        self.tc_objs.universe().types()[&BasicType::Bool]
+    }
+
+    pub fn should_cast_to_iface(&self, lhs: TCTypeKey, rhs: TCTypeKey) -> bool {
+        let vt1 = self.obj_underlying_value_type(rhs);
+        self.obj_underlying_value_type(lhs) == ValueType::Interface
+            && vt1 != ValueType::Interface
+            && vt1 != ValueType::Void
+    }
+
     fn range_tc_types(&self, typ: TCTypeKey) -> [TCTypeKey; 3] {
         let t_int = self.tc_objs.universe().types()[&BasicType::Int];
         let typ = self.tc_objs.types[typ].underlying().unwrap_or(typ);
@@ -630,6 +679,27 @@ impl<'a> TypeLookup<'a> {
                 .collect(),
             _ => unreachable!(),
         }
+    }
+
+    pub fn iface_binding_info(
+        &mut self,
+        i_s: (TCTypeKey, TCTypeKey),
+        objs: &mut VMObjects,
+        dummy_gcv: &mut GcoVec,
+    ) -> (Meta, Vec<IfaceBinding>) {
+        let iface = self.tc_type_to_meta(i_s.0, objs, dummy_gcv);
+        let named = self.tc_type_to_meta(i_s.1, objs, dummy_gcv);
+        let fields: Vec<&String> = match &objs.metas[iface.underlying(&objs.metas).key] {
+            MetadataType::Interface(m) => m.all().iter().map(|x| &x.name).collect(),
+            _ => unreachable!(),
+        };
+        (
+            named,
+            fields
+                .iter()
+                .map(|x| named.get_iface_binding(x, &objs.metas).unwrap())
+                .collect(),
+        )
     }
 
     fn build_fields(
